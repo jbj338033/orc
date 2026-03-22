@@ -1,12 +1,19 @@
 use crate::provider::Message;
 
 #[derive(Debug)]
+pub struct PendingToolCall {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug)]
 pub struct Session {
     pub provider_id: String,
     pub model: String,
     pub messages: Vec<Message>,
     streaming_text: String,
     tool_input_buffer: String,
+    pending_tool: Option<PendingToolCall>,
 }
 
 impl Session {
@@ -17,6 +24,7 @@ impl Session {
             messages: Vec::new(),
             streaming_text: String::new(),
             tool_input_buffer: String::new(),
+            pending_tool: None,
         }
     }
 
@@ -42,5 +50,13 @@ impl Session {
 
     pub fn finish_streaming(&mut self) -> String {
         std::mem::take(&mut self.streaming_text)
+    }
+
+    pub fn set_pending_tool(&mut self, id: String, name: String) {
+        self.pending_tool = Some(PendingToolCall { id, name });
+    }
+
+    pub fn take_pending_tool(&mut self) -> Option<PendingToolCall> {
+        self.pending_tool.take()
     }
 }
