@@ -1,12 +1,14 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use futures::stream::StreamExt;
 use futures::Stream;
+use futures::stream::StreamExt;
 
 use super::{
     ConfigField, FieldType, Message, ModelInfo, Provider, ProviderFactory, SseParser, StreamEvent,
+    oauth::{self, OAuthTokens},
 };
 use crate::config::ProviderEntry;
 use crate::tool::ToolDefinition;
@@ -52,20 +54,85 @@ impl ProviderFactory for AnthropicFactory {
     }
 
     fn create(&self, entry: &ProviderEntry) -> Result<Box<dyn Provider>> {
-        let api_key = entry
+        let auth_method = entry
             .auth
-            .resolve_api_key()
-            .context("anthropic api key not found")?;
-        Ok(Box::new(AnthropicProvider {
-            name: entry.id.clone(),
-            api_key,
-        }))
+            .method
+            .as_deref()
+            .unwrap_or("api_key");
+
+        match auth_method {
+            "oauth" => {
+                let tokens = oauth::load_tokens(&entry.id)?;
+                Ok(Box::new(AnthropicProvider {
+                    name: entry.id.clone(),
+                    auth: AuthMethod::OAuth {
+                        tokens: Mutex::new(tokens),
+                        provider_id: entry.id.clone(),
+                    },
+                }))
+            }
+            _ => {
+                let api_key = entry
+                    .auth
+                    .resolve_api_key()
+                    .context("anthropic api key not found")?;
+                Ok(Box::new(AnthropicProvider {
+                    name: entry.id.clone(),
+                    auth: AuthMethod::ApiKey(api_key),
+                }))
+            }
+        }
     }
+}
+
+enum AuthMethod {
+    ApiKey(String),
+    OAuth {
+        tokens: Mutex<Option<OAuthTokens>>,
+        provider_id: String,
+    },
 }
 
 struct AnthropicProvider {
     name: String,
-    api_key: String,
+    auth: AuthMethod,
+}
+
+impl AnthropicProvider {
+    async fn get_auth_header(&self) -> Result<(&'static str, String)> {
+        match &self.auth {
+            AuthMethod::ApiKey(key) => Ok(("x-api-key", key.clone())),
+            AuthMethod::OAuth {
+                tokens,
+                provider_id,
+            } => {
+                let current = {
+                    let guard = tokens.lock().unwrap();
+                    guard.clone()
+                };
+
+                match current {
+                    Some(t) if !t.is_expired() => {
+                        Ok(("Authorization", format!("Bearer {}", t.access_token)))
+                    }
+                    Some(t) if t.refresh_token.is_some() => {
+                        let refresh = t.refresh_token.as_ref().unwrap();
+                        let new_tokens =
+                            oauth::refresh_access_token(provider_id, refresh).await?;
+                        let header = format!("Bearer {}", new_tokens.access_token);
+                        *tokens.lock().unwrap() = Some(new_tokens);
+                        Ok(("Authorization", header))
+                    }
+                    _ => {
+                        let new_tokens = oauth::run_oauth_flow(provider_id).await?;
+                        let header = format!("Bearer {}", new_tokens.access_token);
+                        *tokens.lock().unwrap() = Some(new_tokens);
+                        Ok(("Authorization", header))
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Provider for AnthropicProvider {
@@ -96,6 +163,8 @@ impl Provider for AnthropicProvider {
         let tools = tools.to_vec();
 
         Box::pin(async move {
+            let (header_name, header_value) = self.get_auth_header().await?;
+
             let api_messages = messages
                 .iter()
                 .map(|m| {
@@ -129,7 +198,7 @@ impl Provider for AnthropicProvider {
 
             let response = reqwest::Client::new()
                 .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &self.api_key)
+                .header(header_name, &header_value)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body)
