@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -7,7 +8,8 @@ use futures::Stream;
 use futures::stream::StreamExt;
 
 use super::{
-    ConfigField, FieldType, Message, ModelInfo, Provider, ProviderFactory, SseParser, StreamEvent,
+    ConfigField, FieldType, Message, ModelInfo, Provider, ProviderFactory, Role, SseParser,
+    StreamEvent,
     oauth::{self, OAuthTokens},
 };
 use crate::config::ProviderEntry;
@@ -54,11 +56,7 @@ impl ProviderFactory for AnthropicFactory {
     }
 
     fn create(&self, entry: &ProviderEntry) -> Result<Box<dyn Provider>> {
-        let auth_method = entry
-            .auth
-            .method
-            .as_deref()
-            .unwrap_or("api_key");
+        let auth_method = entry.auth.method.as_deref().unwrap_or("api_key");
 
         match auth_method {
             "oauth" => {
@@ -106,10 +104,7 @@ impl AnthropicProvider {
                 tokens,
                 provider_id,
             } => {
-                let current = {
-                    let guard = tokens.lock().unwrap();
-                    guard.clone()
-                };
+                let current = { tokens.lock().unwrap().clone() };
 
                 match current {
                     Some(t) if !t.is_expired() => {
@@ -156,8 +151,14 @@ impl Provider for AnthropicProvider {
         model: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Pin<Box<dyn Future<Output = Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>,
+                > + Send
+                + '_,
+        >,
+    > {
         let model = model.to_string();
         let messages = messages.to_vec();
         let tools = tools.to_vec();
@@ -165,14 +166,17 @@ impl Provider for AnthropicProvider {
         Box::pin(async move {
             let (header_name, header_value) = self.get_auth_header().await?;
 
+            // system 메시지 분리
+            let system_text: Option<String> = messages
+                .iter()
+                .filter(|m| matches!(m.role, Role::System))
+                .map(|m| m.text())
+                .reduce(|a, b| format!("{a}\n{b}"));
+
             let api_messages = messages
                 .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                    })
-                })
+                .filter(|m| !matches!(m.role, Role::System))
+                .map(|m| build_anthropic_message(m))
                 .collect::<Vec<_>>();
 
             let mut body = serde_json::json!({
@@ -181,6 +185,10 @@ impl Provider for AnthropicProvider {
                 "stream": true,
                 "messages": api_messages,
             });
+
+            if let Some(sys) = system_text {
+                body["system"] = serde_json::Value::String(sys);
+            }
 
             if !tools.is_empty() {
                 let tool_defs: Vec<_> = tools
@@ -214,13 +222,17 @@ impl Provider for AnthropicProvider {
 
             let byte_stream = response.bytes_stream();
             let mut parser = SseParser::new();
+            // block type 추적: index → is_tool_use
+            let mut block_types: HashMap<u64, bool> = HashMap::new();
 
             let event_stream = byte_stream.flat_map(move |chunk| {
                 let events = match chunk {
                     Ok(bytes) => parser
                         .feed(&bytes)
                         .into_iter()
-                        .filter_map(|sse| parse_anthropic_sse(&sse))
+                        .filter_map(|sse| {
+                            parse_anthropic_sse(&sse, &mut block_types)
+                        })
                         .collect::<Vec<_>>(),
                     Err(e) => vec![StreamEvent::Error(e.to_string())],
                 };
@@ -232,27 +244,79 @@ impl Provider for AnthropicProvider {
     }
 }
 
-fn parse_anthropic_sse(sse: &super::SseEvent) -> Option<StreamEvent> {
+/// Anthropic API 메시지 형식으로 변환
+fn build_anthropic_message(msg: &Message) -> serde_json::Value {
+    use super::ContentBlock;
+
+    let content: Vec<serde_json::Value> = msg
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => {
+                serde_json::json!({ "type": "text", "text": text })
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                serde_json::json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input,
+                })
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let mut val = serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": [{ "type": "text", "text": content }],
+                });
+                if *is_error {
+                    val["is_error"] = serde_json::Value::Bool(true);
+                }
+                val
+            }
+        })
+        .collect();
+
+    serde_json::json!({
+        "role": msg.role,
+        "content": content,
+    })
+}
+
+fn parse_anthropic_sse(
+    sse: &super::SseEvent,
+    block_types: &mut HashMap<u64, bool>,
+) -> Option<StreamEvent> {
     let event_type = sse.event_type.as_deref()?;
     let json = sse.json()?;
 
     match event_type {
         "content_block_start" => {
+            let index = json["index"].as_u64().unwrap_or(0);
             let block = &json["content_block"];
-            match block["type"].as_str()? {
-                "tool_use" => Some(StreamEvent::ToolUseStart {
-                    id: block["id"].as_str()?.to_string(),
-                    name: block["name"].as_str()?.to_string(),
-                }),
-                _ => None,
+            let block_type = block["type"].as_str().unwrap_or("");
+            let is_tool = block_type == "tool_use";
+            block_types.insert(index, is_tool);
+
+            if is_tool {
+                Some(StreamEvent::ToolUseStart {
+                    id: block["id"].as_str().unwrap_or("").to_string(),
+                    name: block["name"].as_str().unwrap_or("").to_string(),
+                })
+            } else {
+                None
             }
         }
         "content_block_delta" => {
             let delta = &json["delta"];
             match delta["type"].as_str()? {
-                "text_delta" => Some(StreamEvent::Delta(
-                    delta["text"].as_str()?.to_string(),
-                )),
+                "text_delta" => {
+                    Some(StreamEvent::Delta(delta["text"].as_str()?.to_string()))
+                }
                 "input_json_delta" => Some(StreamEvent::ToolUseInput(
                     delta["partial_json"].as_str()?.to_string(),
                 )),
@@ -260,8 +324,8 @@ fn parse_anthropic_sse(sse: &super::SseEvent) -> Option<StreamEvent> {
             }
         }
         "content_block_stop" => {
-            let index = json["index"].as_u64()?;
-            if index > 0 {
+            let index = json["index"].as_u64().unwrap_or(0);
+            if block_types.get(&index).copied().unwrap_or(false) {
                 Some(StreamEvent::ToolUseEnd)
             } else {
                 None
