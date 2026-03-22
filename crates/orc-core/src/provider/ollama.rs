@@ -50,13 +50,20 @@ impl Provider for OllamaProvider {
     }
 
     fn models(&self) -> Vec<ModelInfo> {
-        // 동기적으로 ollama 모델 목록 조회 (blocking)
         let url = format!("{}/api/tags", self.base_url);
-        let result = reqwest::blocking::get(&url)
-            .and_then(|r| r.json::<serde_json::Value>());
+        // tokio runtime 밖의 별도 OS 스레드에서 blocking HTTP 호출
+        let handle = std::thread::spawn(move || {
+            reqwest::blocking::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .and_then(|r| r.json::<serde_json::Value>())
+        });
+
+        let result = handle.join().ok().and_then(|r| r.ok());
 
         match result {
-            Ok(json) => json["models"]
+            Some(json) => json["models"]
                 .as_array()
                 .map(|models| {
                     models
@@ -72,7 +79,7 @@ impl Provider for OllamaProvider {
                         .collect()
                 })
                 .unwrap_or_default(),
-            Err(_) => vec![],
+            None => vec![],
         }
     }
 
