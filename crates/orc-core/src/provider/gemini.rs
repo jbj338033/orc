@@ -2,11 +2,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Context, Result};
-use futures::stream::StreamExt;
 use futures::Stream;
+use futures::stream::StreamExt;
 
 use super::{
-    ConfigField, FieldType, Message, ModelInfo, Provider, ProviderFactory, SseParser, StreamEvent,
+    ConfigField, FieldType, Message, ModelInfo, Provider, ProviderFactory, Role, SseParser,
+    StreamEvent,
 };
 use crate::config::ProviderEntry;
 use crate::tool::ToolDefinition;
@@ -80,19 +81,34 @@ impl Provider for GeminiProvider {
         model: &str,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Pin<Box<dyn Future<Output = Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>> + Send + '_>>
-    {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>,
+                > + Send
+                + '_,
+        >,
+    > {
         let model = model.to_string();
         let messages = messages.to_vec();
-        let _tools = tools.to_vec();
+        let tools = tools.to_vec();
 
         Box::pin(async move {
+            // system 메시지 분리
+            let system_text: Option<String> = messages
+                .iter()
+                .filter(|m| matches!(m.role, Role::System))
+                .map(|m| m.text())
+                .reduce(|a, b| format!("{a}\n{b}"));
+
             let contents: Vec<_> = messages
                 .iter()
+                .filter(|m| !matches!(m.role, Role::System))
                 .map(|m| {
                     let role = match m.role {
-                        super::Role::User | super::Role::System => "user",
-                        super::Role::Assistant => "model",
+                        Role::User => "user",
+                        Role::Assistant => "model",
+                        Role::System => unreachable!(),
                     };
                     serde_json::json!({
                         "role": role,
@@ -101,9 +117,31 @@ impl Provider for GeminiProvider {
                 })
                 .collect();
 
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "contents": contents,
             });
+
+            if let Some(sys) = system_text {
+                body["systemInstruction"] = serde_json::json!({
+                    "parts": [{"text": sys}]
+                });
+            }
+
+            if !tools.is_empty() {
+                let function_declarations: Vec<_> = tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema,
+                        })
+                    })
+                    .collect();
+                body["tools"] = serde_json::json!([{
+                    "functionDeclarations": function_declarations,
+                }]);
+            }
 
             let url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
@@ -132,7 +170,7 @@ impl Provider for GeminiProvider {
                     Ok(bytes) => parser
                         .feed(&bytes)
                         .into_iter()
-                        .filter_map(|sse| parse_gemini_sse(&sse))
+                        .flat_map(|sse| parse_gemini_sse(&sse))
                         .collect::<Vec<_>>(),
                     Err(e) => vec![StreamEvent::Error(e.to_string())],
                 };
@@ -144,23 +182,41 @@ impl Provider for GeminiProvider {
     }
 }
 
-fn parse_gemini_sse(sse: &super::SseEvent) -> Option<StreamEvent> {
-    let json = sse.json()?;
+fn parse_gemini_sse(sse: &super::SseEvent) -> Vec<StreamEvent> {
+    let json = match sse.json() {
+        Some(j) => j,
+        None => return vec![],
+    };
+
+    let mut events = Vec::new();
 
     if let Some(candidates) = json["candidates"].as_array() {
         if let Some(candidate) = candidates.first() {
             if let Some(parts) = candidate["content"]["parts"].as_array() {
                 for part in parts {
                     if let Some(text) = part["text"].as_str() {
-                        return Some(StreamEvent::Delta(text.to_string()));
+                        events.push(StreamEvent::Delta(text.to_string()));
+                    }
+                    // function call
+                    if let Some(fc) = part.get("functionCall") {
+                        if let Some(name) = fc["name"].as_str() {
+                            events.push(StreamEvent::ToolUseStart {
+                                id: name.to_string(),
+                                name: name.to_string(),
+                            });
+                            if let Some(args) = fc.get("args") {
+                                events.push(StreamEvent::ToolUseInput(args.to_string()));
+                            }
+                            events.push(StreamEvent::ToolUseEnd);
+                        }
                     }
                 }
             }
             if candidate["finishReason"].as_str().is_some() {
-                return Some(StreamEvent::Done);
+                events.push(StreamEvent::Done);
             }
         }
     }
 
-    None
+    events
 }
