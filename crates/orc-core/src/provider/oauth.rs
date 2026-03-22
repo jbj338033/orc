@@ -1,10 +1,10 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::Rng;
 use sha2::{Digest, Sha256};
+
+use crate::config::tokens_dir;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
@@ -18,17 +18,8 @@ pub struct OAuthTokens {
     pub expires_at: Option<u64>,
 }
 
-fn tokens_path(provider_id: &str) -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .context("failed to find config directory")?
-        .join("orc")
-        .join("tokens");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!("{provider_id}.json")))
-}
-
 pub fn load_tokens(provider_id: &str) -> Result<Option<OAuthTokens>> {
-    let path = tokens_path(provider_id)?;
+    let path = tokens_dir()?.join(format!("{provider_id}.json"));
     if !path.exists() {
         return Ok(None);
     }
@@ -38,7 +29,7 @@ pub fn load_tokens(provider_id: &str) -> Result<Option<OAuthTokens>> {
 }
 
 pub fn save_tokens(provider_id: &str, tokens: &OAuthTokens) -> Result<()> {
-    let path = tokens_path(provider_id)?;
+    let path = tokens_dir()?.join(format!("{provider_id}.json"));
     let content = serde_json::to_string_pretty(tokens)?;
     std::fs::write(&path, content)?;
     Ok(())

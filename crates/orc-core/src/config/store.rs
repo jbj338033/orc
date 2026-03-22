@@ -4,15 +4,24 @@ use anyhow::{Context, Result};
 
 use super::AppConfig;
 
-fn config_dir() -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .context("failed to find config directory")?
-        .join("orc");
+/// ~/.orc/
+pub fn orc_dir() -> Result<PathBuf> {
+    let dir = dirs::home_dir()
+        .context("failed to find home directory")?
+        .join(".orc");
     Ok(dir)
 }
 
+/// ~/.orc/config.toml
 pub fn config_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("config.toml"))
+    Ok(orc_dir()?.join("config.toml"))
+}
+
+/// ~/.orc/tokens/
+pub fn tokens_dir() -> Result<PathBuf> {
+    let dir = orc_dir()?.join("tokens");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 pub fn load_config() -> Result<AppConfig> {
@@ -32,8 +41,7 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content =
-        toml::to_string_pretty(config).context("failed to serialize config")?;
+    let content = toml::to_string_pretty(config).context("failed to serialize config")?;
     std::fs::write(&path, content)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
