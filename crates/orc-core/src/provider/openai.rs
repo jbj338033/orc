@@ -174,7 +174,7 @@ impl Provider for OpenAiProvider {
                     Ok(bytes) => parser
                         .feed(&bytes)
                         .into_iter()
-                        .filter_map(|sse| parse_openai_sse(&sse))
+                        .flat_map(|sse| parse_openai_sse(&sse))
                         .collect::<Vec<_>>(),
                     Err(e) => vec![StreamEvent::Error(e.to_string())],
                 };
@@ -186,33 +186,42 @@ impl Provider for OpenAiProvider {
     }
 }
 
-fn parse_openai_sse(sse: &super::SseEvent) -> Option<StreamEvent> {
+fn parse_openai_sse(sse: &super::SseEvent) -> Vec<StreamEvent> {
     if sse.data.trim() == "[DONE]" {
-        return Some(StreamEvent::Done);
+        return vec![StreamEvent::Done];
     }
 
-    let json = sse.json()?;
-    let choice = json["choices"].get(0)?;
+    let json = match sse.json() {
+        Some(j) => j,
+        None => return vec![],
+    };
+    let choice = match json["choices"].get(0) {
+        Some(c) => c,
+        None => return vec![],
+    };
     let delta = &choice["delta"];
+    let mut events = Vec::new();
 
     if let Some(content) = delta["content"].as_str() {
         if !content.is_empty() {
-            return Some(StreamEvent::Delta(content.to_string()));
+            events.push(StreamEvent::Delta(content.to_string()));
         }
     }
 
     if let Some(tool_calls) = delta["tool_calls"].as_array() {
         for tc in tool_calls {
             if let Some(function) = tc.get("function") {
+                // 첫 chunk: id + name
                 if let Some(name) = function["name"].as_str() {
-                    return Some(StreamEvent::ToolUseStart {
-                        id: tc["id"].as_str().unwrap_or("").to_string(),
-                        name: name.to_string(),
-                    });
+                    if !name.is_empty() {
+                        let id = tc["id"].as_str().unwrap_or("").to_string();
+                        events.push(StreamEvent::ToolUseStart { id, name: name.to_string() });
+                    }
                 }
+                // 이어지는 chunk: arguments (점진적)
                 if let Some(args) = function["arguments"].as_str() {
                     if !args.is_empty() {
-                        return Some(StreamEvent::ToolUseInput(args.to_string()));
+                        events.push(StreamEvent::ToolUseInput(args.to_string()));
                     }
                 }
             }
@@ -220,8 +229,8 @@ fn parse_openai_sse(sse: &super::SseEvent) -> Option<StreamEvent> {
     }
 
     if choice["finish_reason"].as_str() == Some("tool_calls") {
-        return Some(StreamEvent::ToolUseEnd);
+        events.push(StreamEvent::ToolUseEnd);
     }
 
-    None
+    events
 }
