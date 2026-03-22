@@ -3,7 +3,9 @@ use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
 use futures::StreamExt;
 use orc_core::config::{AppConfig, load_config};
 use orc_core::event::{Event, ModalKind, Screen};
-use orc_core::provider::{ContentBlock, Message, Provider, ProviderRegistry, Role, StreamEvent};
+use orc_core::provider::{
+    ContentBlock, Message, Provider, ProviderRegistry, Role, StreamEvent, oauth,
+};
 use orc_core::session::Session;
 use orc_core::tool::{ToolContext, ToolRegistry};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -305,6 +307,43 @@ impl App {
             }
             Event::ToolDone { id, result } => {
                 self.handle_tool_done(&id, result).await;
+            }
+            Event::StartOAuth { provider_id } => {
+                let tx = self.event_tx.clone();
+                tokio::spawn(async move {
+                    match oauth::run_oauth_flow(&provider_id).await {
+                        Ok(_) => {
+                            let _ = tx.send(Event::OAuthDone);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::OAuthError(e.to_string()));
+                        }
+                    }
+                });
+            }
+            Event::OAuthDone => {
+                self.init_provider();
+                self.screen = Screen::Main;
+            }
+            Event::OAuthError(_) => {
+                // 실패하면 config에서 제거
+                if self.setup_screen.is_some() {
+                    // setup_screen의 instance_name에 접근 불가하므로 마지막 provider 제거
+                    if let Some(last) = self.config.provider.last() {
+                        if last.auth.method.as_deref() == Some("oauth") {
+                            self.config.provider.pop();
+                            if self.config.default_provider.as_deref()
+                                == self.config.provider.last().map(|p| p.id.as_str())
+                            {
+                                self.config.default_provider = None;
+                            }
+                            let _ = orc_core::config::save_config(&self.config);
+                        }
+                    }
+                }
+                // setup으로 돌아가기
+                self.setup_screen = Some(SetupScreen::new(&self.provider_registry));
+                self.screen = Screen::Setup;
             }
             _ => {}
         }

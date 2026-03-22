@@ -20,6 +20,11 @@ pub enum Event {
     // config
     ProviderChanged,
     ModelChanged(String),
+
+    // oauth
+    StartOAuth { provider_id: String },
+    OAuthDone,
+    OAuthError(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

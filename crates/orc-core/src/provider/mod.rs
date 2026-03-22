@@ -1,7 +1,7 @@
 mod anthropic;
 mod gemini;
 mod message;
-pub(crate) mod oauth;
+pub mod oauth;
 mod ollama;
 mod openai;
 mod stream;

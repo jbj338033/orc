@@ -211,14 +211,13 @@ impl SetupScreen {
                 vec![]
             }
             SetupStep::OAuthWaiting => {
-                if key.code == KeyCode::Esc {
+                if key.code == KeyCode::Esc && !self.oauth_pending {
                     self.step = SetupStep::SelectAuth;
-                    self.oauth_pending = false;
                     return vec![];
                 }
                 if key.code == KeyCode::Enter && !self.oauth_pending {
                     self.oauth_pending = true;
-                    // provider를 먼저 config에 저장 (oauth method로)
+                    // config에 저장
                     let entry = ProviderEntry {
                         id: self.instance_name.clone(),
                         provider_type: self.selected_factory_id.clone(),
@@ -229,7 +228,15 @@ impl SetupScreen {
                             api_key_env: None,
                         },
                     };
-                    return self.finish_setup(config, entry);
+                    if config.default_provider.is_none() {
+                        config.default_provider = Some(entry.id.clone());
+                    }
+                    config.provider.push(entry);
+                    let _ = orc_core::config::save_config(config);
+                    // 브라우저 OAuth flow 시작
+                    return vec![Event::StartOAuth {
+                        provider_id: self.instance_name.clone(),
+                    }];
                 }
                 vec![]
             }
@@ -344,9 +351,9 @@ impl SetupScreen {
                 ]));
 
                 let (msg, style) = if self.oauth_pending {
-                    ("  Saving... Browser will open on first message.", Theme::dimmed())
+                    ("  Browser opened. Complete login there...", Theme::dimmed())
                 } else {
-                    ("  Press Enter to save. Browser opens on first use.", Theme::base())
+                    ("  Press Enter to open browser and log in", Theme::base())
                 };
 
                 let action = Paragraph::new(Span::styled(msg, style));
