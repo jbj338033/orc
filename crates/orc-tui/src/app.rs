@@ -3,9 +3,9 @@ use crossterm::event::{self, Event as CrosstermEvent, KeyCode};
 use futures::StreamExt;
 use orc_core::config::{AppConfig, load_config};
 use orc_core::event::{Event, ModalKind, Screen};
-use orc_core::provider::{Message, Provider, ProviderRegistry, StreamEvent};
+use orc_core::provider::{ContentBlock, Message, Provider, ProviderRegistry, Role, StreamEvent};
 use orc_core::session::Session;
-use orc_core::tool::ToolRegistry;
+use orc_core::tool::{ToolContext, ToolRegistry};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::Clear;
 use tokio::sync::mpsc;
@@ -17,10 +17,21 @@ use crate::screen::setup::SetupScreen;
 use crate::terminal::Tui;
 use crate::widget::ListSelect;
 
+const SYSTEM_PROMPT: &str = r#"You are an AI coding assistant running inside a terminal. You have access to tools for interacting with the user's filesystem and running commands.
+
+When the user asks you to perform a task:
+1. Use the available tools to read, write, and edit files
+2. Use bash to run commands when needed
+3. Use grep and glob to search the codebase
+4. Explain what you're doing briefly
+
+Be concise and direct. Focus on getting the task done."#;
+
 pub struct App {
     config: AppConfig,
     provider_registry: ProviderRegistry,
     tool_registry: ToolRegistry,
+    tool_context: ToolContext,
     active_provider: Option<Box<dyn Provider>>,
     current_model: String,
     session: Option<Session>,
@@ -45,6 +56,7 @@ impl App {
         let config = load_config()?;
         let provider_registry = ProviderRegistry::new();
         let tool_registry = ToolRegistry::new();
+        let tool_context = ToolContext::default();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let screen = if config.provider.is_empty() {
@@ -63,6 +75,7 @@ impl App {
             config,
             provider_registry,
             tool_registry,
+            tool_context,
             active_provider: None,
             current_model: String::new(),
             session: None,
@@ -97,10 +110,15 @@ impl App {
                         .clone()
                         .or_else(|| models.first().map(|m| m.id.clone()))
                         .unwrap_or_default();
-                    self.session = Some(Session::new(
-                        provider_id.clone(),
-                        self.current_model.clone(),
-                    ));
+                    let mut session =
+                        Session::new(provider_id.clone(), self.current_model.clone());
+                    session.push(Message {
+                        role: Role::System,
+                        content: vec![ContentBlock::Text {
+                            text: SYSTEM_PROMPT.to_string(),
+                        }],
+                    });
+                    self.session = Some(session);
                     self.active_provider = Some(provider);
                 }
             }
@@ -110,7 +128,6 @@ impl App {
     pub async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
         let (key_tx, mut key_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
 
-        // 키 이벤트를 별도 스레드에서 읽기
         std::thread::spawn(move || loop {
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(evt) = event::read() {
@@ -144,6 +161,22 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        // 스트리밍 중에는 Ctrl+C로 중단만 허용
+        if self.is_streaming {
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                self.is_streaming = false;
+                if let Some(session) = &mut self.session {
+                    let text = session.finish_streaming();
+                    if !text.is_empty() {
+                        session.push(Message::assistant(&text));
+                    }
+                }
+            }
+            return;
+        }
+
         // 모달이 열려있으면 모달에서 처리
         if let Some(modal) = &mut self.modal {
             match key.code {
@@ -187,14 +220,11 @@ impl App {
             }
         }
 
-        // 글로벌 키 처리
         if let Some(event) = handle_global_key(key) {
-            let tx = self.event_tx.clone();
-            let _ = tx.send(event);
+            let _ = self.event_tx.send(event);
             return;
         }
 
-        // 현재 화면에 키 전달
         let events = match self.screen {
             Screen::Setup => {
                 if let Some(ref mut setup) = self.setup_screen {
@@ -262,11 +292,8 @@ impl App {
             Event::Stream(stream_event) => {
                 self.handle_stream_event(stream_event).await;
             }
-            Event::ToolStart { .. } => {
-                // tool 실행 시작 표시는 향후 구현
-            }
             Event::ToolDone { id, result } => {
-                self.handle_tool_result(&id, result).await;
+                self.handle_tool_done(&id, result).await;
             }
             _ => {}
         }
@@ -279,10 +306,19 @@ impl App {
         };
 
         session.push(Message::user(&text));
+        self.start_streaming().await;
+    }
+
+    async fn start_streaming(&mut self) {
         self.is_streaming = true;
 
         let provider = match &self.active_provider {
             Some(p) => p,
+            None => return,
+        };
+
+        let session = match &self.session {
+            Some(s) => s,
             None => return,
         };
 
@@ -293,7 +329,6 @@ impl App {
 
         match provider.stream(&model, &messages, &tool_defs).await {
             Ok(mut stream) => {
-                let tx = tx.clone();
                 tokio::spawn(async move {
                     while let Some(event) = stream.next().await {
                         if tx.send(Event::Stream(event)).is_err() {
@@ -320,22 +355,61 @@ impl App {
                 self.main_screen.on_stream_delta();
             }
             StreamEvent::ToolUseStart { id, name } => {
-                // 현재 스트리밍 텍스트 확정
                 let text = session.finish_streaming();
                 if !text.is_empty() {
                     session.push(Message::assistant(&text));
                 }
-                let _ = self.event_tx.send(Event::ToolStart {
-                    id: id.clone(),
-                    name: name.clone(),
-                });
+                session.set_pending_tool(id, name);
             }
             StreamEvent::ToolUseInput(chunk) => {
                 session.append_tool_input(&chunk);
             }
             StreamEvent::ToolUseEnd => {
-                let _input = session.take_tool_input();
-                // tool 실행은 향후 여기서 처리
+                let input_json = session.take_tool_input();
+                if let Some(pending) = session.take_pending_tool() {
+                    let input: serde_json::Value =
+                        serde_json::from_str(&input_json).unwrap_or(serde_json::Value::Null);
+
+                    // assistant 메시지에 tool_use 블록 추가
+                    session.push(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: pending.id.clone(),
+                            name: pending.name.clone(),
+                            input: input.clone(),
+                        }],
+                    });
+
+                    // tool 실행
+                    let tool_id = pending.id.clone();
+                    let tool_name = pending.name.clone();
+                    let tx = self.event_tx.clone();
+
+                    if let Some(tool) = self.tool_registry.get(&tool_name) {
+                        let result = tool.execute(input, &self.tool_context).await;
+                        match result {
+                            Ok(tool_result) => {
+                                let _ = tx.send(Event::ToolDone {
+                                    id: tool_id,
+                                    result: tool_result,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Event::ToolDone {
+                                    id: tool_id,
+                                    result: orc_core::tool::ToolResult::err(e.to_string()),
+                                });
+                            }
+                        }
+                    } else {
+                        let _ = tx.send(Event::ToolDone {
+                            id: tool_id,
+                            result: orc_core::tool::ToolResult::err(format!(
+                                "unknown tool: {tool_name}"
+                            )),
+                        });
+                    }
+                }
             }
             StreamEvent::Done => {
                 let text = session.finish_streaming();
@@ -351,8 +425,24 @@ impl App {
         }
     }
 
-    async fn handle_tool_result(&mut self, _id: &str, _result: orc_core::tool::ToolResult) {
-        // tool result를 메시지에 추가하고 재요청하는 로직은 향후 구현
+    async fn handle_tool_done(&mut self, tool_use_id: &str, result: orc_core::tool::ToolResult) {
+        let session = match &mut self.session {
+            Some(s) => s,
+            None => return,
+        };
+
+        // tool result를 메시지에 추가
+        session.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: result.content,
+                is_error: result.is_error,
+            }],
+        });
+
+        // 자동으로 재요청 — provider가 다음 응답 생성
+        self.start_streaming().await;
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
@@ -395,7 +485,6 @@ impl App {
             }
         }
 
-        // 모달 렌더
         if let Some(ref mut modal) = self.modal {
             let modal_area = centered_rect(40, 40, area);
             frame.render_widget(Clear, modal_area);
