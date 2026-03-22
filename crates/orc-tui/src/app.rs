@@ -110,15 +110,26 @@ impl App {
                         .clone()
                         .or_else(|| models.first().map(|m| m.id.clone()))
                         .unwrap_or_default();
-                    let mut session =
-                        Session::new(provider_id.clone(), self.current_model.clone());
-                    session.push(Message {
-                        role: Role::System,
-                        content: vec![ContentBlock::Text {
-                            text: SYSTEM_PROMPT.to_string(),
-                        }],
-                    });
-                    self.session = Some(session);
+
+                    match &mut self.session {
+                        Some(session) => {
+                            // 기존 대화 유지, provider/model만 전환
+                            session.provider_id = provider_id.clone();
+                            session.model = self.current_model.clone();
+                        }
+                        None => {
+                            let mut session =
+                                Session::new(provider_id.clone(), self.current_model.clone());
+                            session.push(Message {
+                                role: Role::System,
+                                content: vec![ContentBlock::Text {
+                                    text: SYSTEM_PROMPT.to_string(),
+                                }],
+                            });
+                            self.session = Some(session);
+                        }
+                    }
+
                     self.active_provider = Some(provider);
                 }
             }
