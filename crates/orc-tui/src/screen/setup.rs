@@ -344,9 +344,9 @@ impl SetupScreen {
                 ]));
 
                 let (msg, style) = if self.oauth_pending {
-                    ("  Waiting for browser authentication...", Theme::dimmed())
+                    ("  Saving... Browser will open on first message.", Theme::dimmed())
                 } else {
-                    ("  Press Enter to open browser for login", Theme::base())
+                    ("  Press Enter to save. Browser opens on first use.", Theme::base())
                 };
 
                 let action = Paragraph::new(Span::styled(msg, style));
