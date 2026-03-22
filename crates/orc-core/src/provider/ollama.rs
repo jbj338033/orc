@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use super::{ConfigField, FieldType, ModelInfo, Provider, ProviderFactory};
 use super::openai::OpenAiProvider;
+use super::{ConfigField, FieldType, ModelInfo, Provider, ProviderFactory};
 use crate::config::ProviderEntry;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -33,17 +33,15 @@ impl ProviderFactory for OllamaFactory {
             .clone()
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Ok(Box::new(OllamaProvider {
-            inner: OpenAiProvider::with_models(
-                entry.id.clone(),
-                String::new(),
-                base_url,
-            ),
+            inner: OpenAiProvider::with_models(entry.id.clone(), String::new(), base_url.clone()),
+            base_url,
         }))
     }
 }
 
 struct OllamaProvider {
     inner: OpenAiProvider,
+    base_url: String,
 }
 
 impl Provider for OllamaProvider {
@@ -52,8 +50,30 @@ impl Provider for OllamaProvider {
     }
 
     fn models(&self) -> Vec<ModelInfo> {
-        // 동적 조회는 향후 구현. 일단 빈 목록 반환하고 사용자가 직접 모델명 입력
-        vec![]
+        // 동기적으로 ollama 모델 목록 조회 (blocking)
+        let url = format!("{}/api/tags", self.base_url);
+        let result = reqwest::blocking::get(&url)
+            .and_then(|r| r.json::<serde_json::Value>());
+
+        match result {
+            Ok(json) => json["models"]
+                .as_array()
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(|m| {
+                            let name = m["name"].as_str()?;
+                            Some(ModelInfo {
+                                id: name.to_string(),
+                                display_name: name.to_string(),
+                                context_window: None,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => vec![],
+        }
     }
 
     fn stream(
