@@ -1,0 +1,12 @@
+[package]
+name = "orc-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orc-core.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+futures.workspace = true

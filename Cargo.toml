@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+orc-core = { path = "crates/orc-core" }
+orc-tui = { path = "crates/orc-tui" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "6"
+futures = "0.3"
+anyhow = "1"
+glob = "0.3"
+ratatui = "0.29"
+crossterm = "0.28"
+
+[package]
+name = "orc"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orc"
+path = "src/main.rs"
+
+[dependencies]
+orc-core.workspace = true
+orc-tui.workspace = true
+tokio.workspace = true
+anyhow.workspace = true

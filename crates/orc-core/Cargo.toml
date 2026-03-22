@@ -1,0 +1,15 @@
+[package]
+name = "orc-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+dirs.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+glob.workspace = true
