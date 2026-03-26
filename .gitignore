@@ -1,0 +1,19 @@
+# Rust
+target/
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
+*.swp
+*.dSYM
+*.ipa
+
+# macOS
+.DS_Store
+
+# UniFFI bindings (generated)
+bindings/
+
+# Misc
+*.log
