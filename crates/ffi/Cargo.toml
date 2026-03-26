@@ -1,0 +1,11 @@
+[package]
+name = "orc-ffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+orc-core = { path = "../core" }
+orc-agent = { path = "../agent" }
