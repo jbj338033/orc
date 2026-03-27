@@ -1,19 +1,12 @@
 # Rust
 target/
 
-# Xcode
-*.xcodeproj/xcuserdata/
-*.xcodeproj/project.xcworkspace/xcuserdata/
-DerivedData/
-*.swp
-*.dSYM
-*.ipa
+# Node
+node_modules/
+dist/
 
 # macOS
 .DS_Store
-
-# UniFFI bindings (generated)
-bindings/
 
 # Misc
 *.log
