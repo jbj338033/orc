@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ConfigStore;
-use crate::runtime::{AgentEngine, AgentEvent, Message, MessageRole};
+use crate::runtime::{AgentEngine, AgentEvent, EngineRequest, Message};
 
 use super::error::AgentError;
 use super::state::{AgentSession, AgentStatus};
@@ -48,23 +48,36 @@ impl AgentManager {
     }
 
     pub async fn send(&self, id: &str, content: String) -> Result<(), AgentError> {
-        let (messages, cancel_token) = {
+        let (messages, cancel_token, system_prompt, max_tokens, temperature) = {
             let mut sessions = self.sessions.write().await;
             let session = sessions
                 .get_mut(id)
                 .ok_or_else(|| AgentError::SessionNotFound(id.to_string()))?;
 
-            session.messages.push(Message {
-                role: MessageRole::User,
-                content,
-            });
+            session.messages.push(Message::user(content));
             session.status = AgentStatus::Thinking;
             session.cancel_token = CancellationToken::new();
 
-            (session.messages.clone(), session.cancel_token.clone())
+            (
+                session.messages.clone(),
+                session.cancel_token.clone(),
+                session.profile.system_prompt.clone(),
+                session.profile.max_tokens,
+                session.profile.temperature,
+            )
         };
 
-        let mut stream = self.engine.send(&messages, &[], cancel_token).await?;
+        let request = EngineRequest {
+            messages: &messages,
+            tools: &[],
+            system_prompt: system_prompt.as_deref(),
+            max_tokens,
+            temperature,
+            cancel: cancel_token,
+            extensions: HashMap::new(),
+        };
+
+        let mut stream = self.engine.send(request).await?;
 
         let handler = Arc::clone(&self.handler);
         let sessions = &self.sessions;
@@ -80,10 +93,7 @@ impl AgentManager {
                 AgentEvent::Done => {
                     let mut sessions = sessions.write().await;
                     if let Some(session) = sessions.get_mut(&session_id) {
-                        session.messages.push(Message {
-                            role: MessageRole::Assistant,
-                            content: full_response.clone(),
-                        });
+                        session.messages.push(Message::assistant(&full_response));
                         session.status = AgentStatus::Idle;
                     }
                 }
