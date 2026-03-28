@@ -4,7 +4,7 @@ pub enum AgentEvent {
     ToolCall {
         id: String,
         name: String,
-        input: String,
+        input: serde_json::Value,
     },
     ToolResult {
         id: String,
