@@ -3,7 +3,8 @@ mod event;
 mod message;
 mod tool;
 
-pub use engine::{AgentEngine, EngineError};
+pub use engine::{AgentEngine, EngineError, EngineRequest};
 pub use event::AgentEvent;
-pub use message::{Message, MessageRole};
-pub use tool::{ToolDef, ToolResult};
+pub use message::{ContentBlock, Message, MessageRole};
+pub use orc_core::provider::ToolDef;
+pub use tool::ToolResult;

@@ -1,11 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
+// ToolDef is re-exported from orc_core::provider::ToolDef via mod.rs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
