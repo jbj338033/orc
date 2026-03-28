@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -6,7 +7,17 @@ use tokio_util::sync::CancellationToken;
 
 use super::event::AgentEvent;
 use super::message::Message;
-use super::tool::ToolDef;
+use orc_core::provider::ToolDef;
+
+pub struct EngineRequest<'a> {
+    pub messages: &'a [Message],
+    pub tools: &'a [ToolDef],
+    pub system_prompt: Option<&'a str>,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub cancel: CancellationToken,
+    pub extensions: HashMap<String, serde_json::Value>,
+}
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -29,8 +40,6 @@ impl std::error::Error for EngineError {}
 pub trait AgentEngine: Send + Sync {
     async fn send(
         &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        cancel: CancellationToken,
+        request: EngineRequest<'_>,
     ) -> Result<Pin<Box<dyn Stream<Item = AgentEvent> + Send>>, EngineError>;
 }
