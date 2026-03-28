@@ -9,9 +9,19 @@ interface AgentSurfaceProps {
 
 export function AgentSurface({ surfaceId }: AgentSurfaceProps) {
   const messages = useChatStore((s) => s.messages[surfaceId]) ?? EMPTY;
+  const streaming = useChatStore((s) => s.streaming[surfaceId]) ?? false;
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const initSession = useChatStore((s) => s.initSession);
+  const destroySession = useChatStore((s) => s.destroySession);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    initSession(surfaceId, "default");
+    return () => {
+      destroySession(surfaceId);
+    };
+  }, [surfaceId, initSession, destroySession]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -19,7 +29,7 @@ export function AgentSurface({ surfaceId }: AgentSurfaceProps) {
 
   const handleSend = () => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    if (!trimmed || streaming) return;
     sendMessage(surfaceId, trimmed);
     setInput("");
   };
@@ -40,7 +50,7 @@ export function AgentSurface({ surfaceId }: AgentSurfaceProps) {
               className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-[13px] leading-relaxed ${
+                className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap ${
                   msg.role === "user"
                     ? "bg-blue-600 text-white"
                     : "bg-white/[0.06] text-neutral-200"
@@ -50,6 +60,13 @@ export function AgentSurface({ surfaceId }: AgentSurfaceProps) {
               </div>
             </div>
           ))}
+          {streaming && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl bg-white/[0.06] px-4 py-2.5 text-[13px] text-neutral-400">
+                <span className="animate-pulse">...</span>
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
       </div>
@@ -72,8 +89,9 @@ export function AgentSurface({ surfaceId }: AgentSurfaceProps) {
           />
           <button
             onClick={handleSend}
+            disabled={streaming}
             className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-all duration-150 ${
-              input.trim()
+              input.trim() && !streaming
                 ? "bg-blue-600 text-white hover:bg-blue-500"
                 : "text-neutral-600"
             }`}
